@@ -46,6 +46,7 @@ WebThreeDirect::WebThreeDirect(
 	NetworkPreferences const& _n,
 	bytesConstRef _network,
 	unsigned const _statePruning,
+	unsigned const _blockDBPruning
 ):
 	m_clientVersion(_clientVersion),
 	m_net(_clientVersion, _n, _network)
@@ -57,7 +58,7 @@ WebThreeDirect::WebThreeDirect(
 
 	if (_interfaces.count("eth"))
 	{
-		m_ethereum.reset(new eth::EthashClient(&m_net, shared_ptr<GasPricer>(), _dbPath, _we));
+		m_ethereum.reset(new eth::EthashClient(&m_net, shared_ptr<GasPricer>(), _dbPath, _we, _blockDBPruning));
 		string bp = DEV_QUOTED(ETH_BUILD_PLATFORM);
 		vector<string> bps;
 		boost::split(bps, bp, boost::is_any_of("/"));

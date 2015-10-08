@@ -289,6 +289,7 @@ int main(int argc, char** argv)
 	OperationMode mode = OperationMode::Node;
 	string dbPath;
 	unsigned statePruning = 0;
+	unsigned blockDBPruning = 0;
 
 //	unsigned prime = 0;
 //	bool yesIReallyKnowWhatImDoing = false;
@@ -564,8 +565,15 @@ int main(int argc, char** argv)
 		}
 		else if ((arg == "-d" || arg == "--path" || arg == "--db-path") && i + 1 < argc)
 			dbPath = argv[++i];
-		else if ((arg == "--pruning") && i + 1 < argc)
+		else if ((arg == "--blockDB-pruning") && i + 1 < argc)
+			blockDBPruning = atoi(argv[++i]);
+		else if ((arg == "--state-tree-pruning") && i + 1 < argc)
 			statePruning = atoi(argv[++i]);
+		else if ((arg == "--pruning") && i + 1 < argc)
+		{
+			statePruning = atoi(argv[++i]);
+			blockDBPruning = statePruning;
+		}
 		else if ((arg == "--genesis-json" || arg == "--genesis") && i + 1 < argc)
 		{
 			try
@@ -944,7 +952,8 @@ int main(int argc, char** argv)
 		nodeMode == NodeMode::Full ? caps : set<string>(),
 		netPrefs,
 		&nodesState,
-		statePruning);
+		statePruning,
+		blockDBPruning);
 	web3.ethereum()->setMineOnBadChain(mineOnWrongChain);
 	web3.ethereum()->setSentinel(sentinel);
 	if (!extraData.empty())
