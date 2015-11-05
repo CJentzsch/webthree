@@ -47,8 +47,9 @@ enum WorkState
 
 namespace eth { class Interface; }
 namespace shh { class Interface; }
-namespace bzz { class Interface; }
+namespace bzz { class Interface; class Client; }
 
+class Support;
 
 class WebThreeNetworkFace
 {
@@ -111,7 +112,7 @@ public:
  *
  * Provides a baseline for the multiplexed multi-protocol session class, WebThree.
  */
-class WebThreeDirect : public WebThreeNetworkFace
+class WebThreeDirect: public WebThreeNetworkFace
 {
 public:
 	/// Constructor for private instance. If there is already another process on the machine using @a _dbPath, then this will throw an exception.
@@ -120,7 +121,7 @@ public:
 		std::string const& _clientVersion,
 		std::string const& _dbPath,
 		WithExisting _we = WithExisting::Trust,
-		std::set<std::string> const& _interfaces = {"eth", "shh"},
+		std::set<std::string> const& _interfaces = {"eth", "shh", "bzz"},
 		p2p::NetworkPreferences const& _n = p2p::NetworkPreferences(),
 		bytesConstRef _network = bytesConstRef(),
 		unsigned const _statePruning = 0,
@@ -133,14 +134,14 @@ public:
 
 	eth::Client* ethereum() const { if (!m_ethereum) BOOST_THROW_EXCEPTION(InterfaceNotSupported("eth")); return m_ethereum.get(); }
 	std::shared_ptr<shh::WhisperHost> whisper() const { auto w = m_whisper.lock(); if (!w) BOOST_THROW_EXCEPTION(InterfaceNotSupported("shh")); return w; }
-	bzz::Interface* swarm() const { BOOST_THROW_EXCEPTION(InterfaceNotSupported("bzz")); }
+	bzz::Interface* swarm() const;
+
+	Support* support() const { return m_support.get(); }
 
 	// Misc stuff:
 
 	static std::string composeClientVersion(std::string const& _client, std::string const& _name);
-
 	std::string const& clientVersion() const { return m_clientVersion; }
-
 	void setClientVersion(std::string const& _name) { m_clientVersion = _name; }
 
 	// Network stuff:
@@ -210,11 +211,12 @@ private:
 
 	p2p::Host m_net;								///< Should run in background and send us events when blocks found and allow us to send blocks as required.
 
-	std::unique_ptr<eth::Client> m_ethereum;		///< Main interface for Ethereum ("eth") protocol.
-	std::weak_ptr<shh::WhisperHost> m_whisper;		///< Main interface for Whisper ("shh") protocol.
+	std::unique_ptr<eth::Client> m_ethereum;		///< Client for Ethereum ("eth") protocol.
+	std::weak_ptr<shh::WhisperHost> m_whisper;		///< Client for Whisper ("shh") protocol.
+	std::shared_ptr<bzz::Client> m_swarm;			///< Client for Swarm ("bzz") protocol.
+
+	std::shared_ptr<Support> m_support;
 };
-
-
 
 // TODO, probably move into libdevrpc:
 

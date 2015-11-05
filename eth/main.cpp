@@ -52,9 +52,20 @@
 #endif
 #if ETH_JSONRPC || !ETH_TRUE
 #include <libweb3jsonrpc/AccountHolder.h>
-#include <libweb3jsonrpc/WebThreeStubServer.h>
+#include <libweb3jsonrpc/Eth.h>
 #include <libweb3jsonrpc/SafeHttpServer.h>
 #include <jsonrpccpp/client/connectors/httpclient.h>
+#include <libweb3jsonrpc/ModularServer.h>
+#include <libweb3jsonrpc/IpcServer.h>
+#include <libweb3jsonrpc/LevelDB.h>
+#include <libweb3jsonrpc/Whisper.h>
+#include <libweb3jsonrpc/Net.h>
+#include <libweb3jsonrpc/Web3.h>
+#include <libweb3jsonrpc/SessionManager.h>
+#include <libweb3jsonrpc/AdminNet.h>
+#include <libweb3jsonrpc/AdminEth.h>
+#include <libweb3jsonrpc/AdminUtils.h>
+#include <libweb3jsonrpc/Personal.h>
 #endif
 #include "ethereum/ConfigInfo.h"
 #if ETH_JSONRPC || !ETH_TRUE
@@ -79,7 +90,7 @@ void help()
 		<< "Operating mode (default is non-interactive node):" << endl
 #if ETH_JSCONSOLE || !ETH_TRUE
 		<< "    console  Enter interactive console mode (default: non-interactive)." << endl
-		<< "    attach  Ether interactive console mode of already-running eth."
+		<< "    attach  Ether interactive console mode of already-running eth." << endl
 		<< "    import <file>  Import file as a concatenated series of blocks." << endl
 		<< "    export <file>  Export file as a concatenated series of blocks." << endl
 #endif
@@ -372,6 +383,7 @@ int main(int argc, char** argv)
 
 	/// Wallet password stuff
 	string masterPassword;
+	bool masterSet = false;
 	
 	/// Whisper
 	bool useWhisper = false;
@@ -427,7 +439,10 @@ int main(int argc, char** argv)
 		else if (arg == "--password" && i + 1 < argc)
 			passwordsToNote.push_back(argv[++i]);
 		else if (arg == "--master" && i + 1 < argc)
+		{
 			masterPassword = argv[++i];
+			masterSet = true;
+		}
 		else if ((arg == "-I" || arg == "--import" || arg == "import") && i + 1 < argc)
 		{
 			mode = OperationMode::Import;
@@ -1049,49 +1064,45 @@ int main(int argc, char** argv)
 		cout << imported << " imported in " << e << " seconds at " << (round(imported * 10 / e) / 10) << " blocks/s (#" << web3.ethereum()->number() << ")" << endl;
 		return 0;
 	}
-/*
-	if (c_network == eth::Network::Frontier && !yesIReallyKnowWhatImDoing)
+
+	try
 	{
-		auto pd = contents(getDataDir() + "primes");
-		unordered_set<unsigned> primes = RLP(pd).toUnorderedSet<unsigned>();
-		while (true)
+		if (keyManager.exists())
 		{
-			if (!prime)
-				try
-				{
-					prime = stoi(getPassword("To enter the Frontier, enter a 6 digit prime that you have not entered before: "));
-				}
-				catch (...) {}
-			if (isPrime(prime) && !primes.count(prime))
-				break;
-			prime = 0;
-		}
-		primes.insert(prime);
-		writeFile(getDataDir() + "primes", rlp(primes));
-	}
-*/
-	if (keyManager.exists())
-	{
-		if (!keyManager.load(masterPassword))
-			while (true)
+			if (!keyManager.load(masterPassword))
 			{
-				masterPassword = getPassword("Please enter your MASTER password: ");
-				if (keyManager.load(masterPassword))
-					break;
-				cout << "The password you entered is incorrect. If you have forgotten your password, and you wish to start afresh, manually remove the file: " + getDataDir("ethereum") + "/keys.info" << endl;
+				if (masterSet)
+				{
+					cerr << "Incorrect password specified." << endl;
+					return -1;
+				}
+				while (true)
+				{
+					masterPassword = getPassword("Please enter your MASTER password: ");
+					if (keyManager.load(masterPassword))
+						break;
+					cout << "The password you entered is incorrect. If you have forgotten your password, and you wish to start afresh, manually remove the file: " + getDataDir("ethereum") + "/keys.info" << endl;
+				}
 			}
-	}
-	else
-	{
-		while (true)
-		{
-			masterPassword = getPassword("Please enter a MASTER password to protect your key store (make it strong!): ");
-			string confirm = getPassword("Please confirm the password by entering it again: ");
-			if (masterPassword == confirm)
-				break;
-			cout << "Passwords were different. Try again." << endl;
 		}
-		keyManager.create(masterPassword);
+		else
+		{
+			if (!masterSet)
+				while (true)
+				{
+					masterPassword = getPassword("Please enter a MASTER password to protect your key store (make it strong!): ");
+					string confirm = getPassword("Please confirm the password by entering it again: ");
+					if (masterPassword == confirm)
+						break;
+					cout << "Passwords were different. Try again." << endl;
+				}
+			keyManager.create(masterPassword);
+		}
+	}
+	catch(...)
+	{
+		cerr << "Error initializing key manager: " << boost::current_exception_diagnostic_information() << endl;
+		return -1;
 	}
 
 	for (auto const& presale: presaleImports)
@@ -1149,8 +1160,11 @@ int main(int argc, char** argv)
 		cout << "Networking disabled. To start, use netstart or pass --bootstrap or a remote host." << endl;
 
 #if ETH_JSONRPC || !ETH_TRUE
-	shared_ptr<dev::WebThreeStubServer> jsonrpcServer;
-	unique_ptr<jsonrpc::AbstractServerConnector> jsonrpcConnector;
+	unique_ptr<ModularServer<rpc::EthFace, rpc::DBFace, rpc::WhisperFace,
+	rpc::NetFace, rpc::Web3Face, rpc::PersonalFace,
+	rpc::AdminEthFace, rpc::AdminNetFace, rpc::AdminUtilsFace>> jsonrpcServer;
+	unique_ptr<rpc::SessionManager> sessionManager;
+	unique_ptr<SimpleAccountHolder> accountHolder;
 
 	AddressHash allowedDestinations;
 
@@ -1175,17 +1189,34 @@ int main(int argc, char** argv)
 
 	if (jsonRPCURL > -1 || ipc)
 	{
-		auto safeConnector = new SafeHttpServer(jsonRPCURL, "", "", SensibleHttpThreads);
-		safeConnector->setAllowedOrigin(rpcCorsDomain);
-		jsonrpcConnector.reset(safeConnector);
-		jsonrpcServer = make_shared<dev::WebThreeStubServer>(*jsonrpcConnector.get(), web3, make_shared<SimpleAccountHolder>([&](){ return web3.ethereum(); }, getAccountPassword, keyManager, authenticator), vector<KeyPair>(), keyManager, *gasPricer);
+		sessionManager.reset(new rpc::SessionManager());
+		accountHolder.reset(new SimpleAccountHolder([&](){ return web3.ethereum(); }, getAccountPassword, keyManager, authenticator));
+		auto ethFace = new rpc::Eth(*web3.ethereum(), *accountHolder.get());
+		auto adminEthFace = new rpc::AdminEth(*web3.ethereum(), *gasPricer.get(), keyManager, *sessionManager.get());
+		jsonrpcServer.reset(new ModularServer<rpc::EthFace, rpc::DBFace, rpc::WhisperFace,
+							rpc::NetFace, rpc::Web3Face, rpc::PersonalFace,
+							rpc::AdminEthFace, rpc::AdminNetFace, rpc::AdminUtilsFace>(ethFace, new rpc::LevelDB(), new rpc::Whisper(web3, {}), new rpc::Net(web3), new rpc::Web3(web3.clientVersion()), new rpc::Personal(keyManager), adminEthFace, new rpc::AdminNet(web3, *sessionManager.get()), new rpc::AdminUtils(*sessionManager.get())));
+
 		if (jsonRPCURL > -1)
+		{
+			auto httpConnector = new SafeHttpServer(jsonRPCURL, "", "", SensibleHttpThreads);
+			httpConnector->setAllowedOrigin(rpcCorsDomain);
+			jsonrpcServer->addConnector(httpConnector);
 			jsonrpcServer->StartListening();
-		jsonrpcServer->enableIpc(ipc);
+		}
+
+		if (ipc)
+		{
+			auto ipcConnector = new IpcServer("geth");
+			jsonrpcServer->addConnector(ipcConnector);
+			ipcConnector->StartListening();
+		}
+
 		if (jsonAdmin.empty())
-			jsonAdmin = jsonrpcServer->newSession(SessionPermissions{{Privilege::Admin}});
+			jsonAdmin = sessionManager->newSession(rpc::SessionPermissions{{rpc::Privilege::Admin}});
 		else
-			jsonrpcServer->addSession(jsonAdmin, SessionPermissions{{Privilege::Admin}});
+			sessionManager->addSession(jsonAdmin, rpc::SessionPermissions{{rpc::Privilege::Admin}});
+
 		cout << "JSONRPC Admin Session Key: " << jsonAdmin << endl;
 		writeFile(getDataDir("web3") + "/session.key", jsonAdmin);
 		writeFile(getDataDir("web3") + "/session.url", "http://localhost:" + toString(jsonRPCURL));
@@ -1216,16 +1247,28 @@ int main(int argc, char** argv)
 		if (useConsole)
 		{
 #if ETH_JSCONSOLE || !ETH_TRUE
+			SimpleAccountHolder accountHolder([&](){ return web3.ethereum(); }, getAccountPassword, keyManager, authenticator);
+			rpc::SessionManager sessionManager;
+			string sessionKey = sessionManager.newSession(rpc::SessionPermissions{{rpc::Privilege::Admin}});
+			
+			auto ethFace = new rpc::Eth(*web3.ethereum(), accountHolder);
+			auto adminEthFace = new rpc::AdminEth(*web3.ethereum(), *gasPricer.get(), keyManager, sessionManager);
+			auto adminNetFace = new rpc::AdminNet(web3, sessionManager);
+			auto adminUtilsFace = new rpc::AdminUtils(sessionManager);
+			
+			ModularServer<rpc::EthFace, rpc::DBFace, rpc::WhisperFace, rpc::NetFace, rpc::Web3Face, rpc::PersonalFace, rpc::AdminEthFace, rpc::AdminNetFace, rpc::AdminUtilsFace> rpcServer(ethFace, new rpc::LevelDB(), new rpc::Whisper(web3, {}), new rpc::Net(web3), new rpc::Web3(web3.clientVersion()), new rpc::Personal(keyManager), adminEthFace, adminNetFace, adminUtilsFace);
+
 			JSLocalConsole console;
-			shared_ptr<dev::WebThreeStubServer> rpcServer = make_shared<dev::WebThreeStubServer>(*console.connector(), web3, make_shared<SimpleAccountHolder>([&](){ return web3.ethereum(); }, getAccountPassword, keyManager), vector<KeyPair>(), keyManager, *gasPricer);
-			string sessionKey = rpcServer->newSession(SessionPermissions{{Privilege::Admin}});
+			rpcServer.addConnector(console.createConnector());
+			rpcServer.StartListening();
+
 			console.eval("web3.admin.setSessionKey('" + sessionKey + "')");
 			while (!Client::shouldExit())
 			{
 				console.readAndEval();
 				stopMiningAfterXBlocks(c, n, mining);
 			}
-			rpcServer->StopListening();
+			rpcServer.StopListening();
 #endif
 		}
 		else

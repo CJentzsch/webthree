@@ -25,7 +25,15 @@
 #include <libdevcore/CommonIO.h>
 #include <libethcore/CommonJS.h>
 #include <libwebthree/WebThree.h>
-#include <libweb3jsonrpc/WebThreeStubServer.h>
+#include <libweb3jsonrpc/ModularServer.h>
+#include <libweb3jsonrpc/Whisper.h>
+#include <libweb3jsonrpc/Net.h>
+#include <libweb3jsonrpc/Web3.h>
+#include <libweb3jsonrpc/Eth.h>
+#include <libweb3jsonrpc/AccountHolder.h>
+#include <libweb3jsonrpc/SessionManager.h>
+#include <libweb3jsonrpc/AdminNet.h>
+#include <libweb3jsonrpc/AdminUtils.h>
 #include <jsonrpccpp/server/connectors/httpserver.h>
 #include <jsonrpccpp/client/connectors/httpclient.h>
 #include <test/TestHelper.h>
@@ -42,7 +50,16 @@ using namespace dev::shh;
 namespace js = json_spirit;
 
 WebThreeDirect* web3;
-unique_ptr<WebThreeStubServer> jsonrpcServer;
+
+unique_ptr<ModularServer<rpc::EthFace, rpc::WhisperFace, rpc::NetFace, rpc::Web3Face, rpc::AdminNetFace, rpc::AdminUtilsFace>> modularServer;
+rpc::WhisperFace* whisperFace;
+rpc::NetFace* netFace;
+rpc::Web3Face* w3Face;
+rpc::SessionManager sm;
+rpc::EthFace* ethFace;
+rpc::AdminNetFace* adminNetFace;
+rpc::AdminUtilsFace* adminUtilsFace;
+unique_ptr<AccountHolder> accountHolder;
 unique_ptr<WebThreeStubClient> jsonrpcClient;
 static string const c_version("shhrpc-web3");
 static unsigned const c_ttl = 777000;
@@ -60,12 +77,18 @@ struct Setup
 			web3 = new WebThreeDirect(c_version, "", WithExisting::Trust, {"shh"}, nprefs);
 			web3->setIdealPeerCount(9);
 			auto server = new jsonrpc::HttpServer(8080);
-			vector<KeyPair> v;
 			KeyManager keyMan;
 			TrivialGasPricer gp;
-			jsonrpcServer = unique_ptr<WebThreeStubServer>(new WebThreeStubServer(*server, *web3, nullptr, v, keyMan, gp));
-			jsonrpcServer->setIdentities({});
-			jsonrpcServer->StartListening();
+			accountHolder.reset(new FixedAccountHolder([&](){return web3->ethereum();}, {}));
+			whisperFace = new rpc::Whisper(*web3, {});
+			ethFace = new rpc::Eth(*web3->ethereum(), *accountHolder.get());
+			netFace = new rpc::Net(*web3);
+			w3Face = new rpc::Web3(web3->clientVersion());
+			adminNetFace = new rpc::AdminNet(*web3, sm);
+			adminUtilsFace = new rpc::AdminUtils(sm);
+			modularServer.reset(new ModularServer<rpc::EthFace, rpc::WhisperFace, rpc::NetFace, rpc::Web3Face, rpc::AdminNetFace, rpc::AdminUtilsFace>(ethFace, whisperFace, netFace, w3Face, adminNetFace, adminUtilsFace));
+			modularServer->addConnector(server);
+			modularServer->StartListening();
 			auto client = new jsonrpc::HttpClient("http://localhost:8080");
 			jsonrpcClient = unique_ptr<WebThreeStubClient>(new WebThreeStubClient(*client));
 		}
@@ -294,34 +317,34 @@ BOOST_AUTO_TEST_CASE(serverBasic)
 {
 	cnote << "Testing basic jsonrpc server...";
 
-	string s = jsonrpcServer->web3_clientVersion();
+	string s = w3Face->web3_clientVersion();
 	BOOST_REQUIRE_EQUAL(s, c_version);
 
-	s = jsonrpcServer->net_version();
+	s = netFace->net_version();
 	BOOST_REQUIRE(s.empty());
 
-	s = jsonrpcServer->web3_sha3("some pseudo-random string here");
+	s = w3Face->web3_sha3("some pseudo-random string here");
 	BOOST_REQUIRE_EQUAL(s.size(), h256::size * 2 + 2);
 	BOOST_REQUIRE('0' == s[0] && 'x' == s[1]);
 
-	s = jsonrpcServer->net_peerCount();
+	s = netFace->net_peerCount();
 	BOOST_REQUIRE(!s.empty());
 
 	KeyPair src = KeyPair::create();
 	KeyPair dst = KeyPair::create();
 	Json::Value t1 = createMessage(toJS(src.address()), toJS(dst.address()));
-	bool b = jsonrpcServer->shh_post(t1);
+	bool b = whisperFace->shh_post(t1);
 	BOOST_REQUIRE(b);
 
-	string const id = jsonrpcServer->shh_newIdentity();
+	string const id = whisperFace->shh_newIdentity();
 	BOOST_REQUIRE_EQUAL(id.size(), 130);
 	BOOST_REQUIRE('0' == id[0] && 'x' == id[1]);
 
-	b = jsonrpcServer->shh_hasIdentity(id);
+	b = whisperFace->shh_hasIdentity(id);
 	BOOST_REQUIRE(b);
 
 	Json::Value t2 = createMessage(id, id);
-	b = jsonrpcServer->shh_post(t2);
+	b = whisperFace->shh_post(t2);
 	BOOST_REQUIRE(b);
 }
 
@@ -332,44 +355,44 @@ BOOST_AUTO_TEST_CASE(server)
 	bool b;
 	string s;
 	Json::Value j;
-	SessionPermissions permissions;
-	permissions.privileges.insert(Privilege::Admin);
+	rpc::SessionPermissions permissions;
+	permissions.privileges.insert(rpc::Privilege::Admin);
 	string const text = string("0x") + h256::random().hex(); // message must be in raw form
 
-	string sess1 = jsonrpcServer->newSession(permissions);
+	string sess1 = sm.newSession(permissions);
 	string sess2("session number two");
-	jsonrpcServer->addSession(sess2, permissions);
+	sm.addSession(sess2, permissions);
 	
 	int newVerbosity = 10;
 	int oldVerbosity = g_logVerbosity;
-	b = jsonrpcServer->admin_setVerbosity(newVerbosity, sess1);
+	b = adminUtilsFace->admin_setVerbosity(newVerbosity, sess1);
 	BOOST_REQUIRE(b);
 	BOOST_REQUIRE_EQUAL(g_logVerbosity, newVerbosity);
 
-	b = jsonrpcServer->admin_setVerbosity(oldVerbosity, sess1);
+	b = adminUtilsFace->admin_setVerbosity(oldVerbosity, sess1);
 	BOOST_REQUIRE(b);
 	BOOST_REQUIRE_EQUAL(g_logVerbosity, oldVerbosity);
 
-	b = jsonrpcServer->admin_net_start(sess1);
+	b = adminNetFace->admin_net_start(sess1);
 	BOOST_REQUIRE(b);
 
 	unsigned const step = 10;
-	for (unsigned i = 0; i < 3000 && !jsonrpcServer->net_listening(); i += step)
+	for (unsigned i = 0; i < 3000 && !netFace->net_listening(); i += step)
 		this_thread::sleep_for(chrono::milliseconds(step));
 
-	b = jsonrpcServer->net_listening();
+	b = netFace->net_listening();
 	BOOST_REQUIRE(b);
 	
-	b = jsonrpcServer->admin_net_stop(sess1);
+	b = adminNetFace->admin_net_stop(sess1);
 	BOOST_REQUIRE(b);
 
-	b = jsonrpcServer->net_listening();
+	b = netFace->net_listening();
 	BOOST_REQUIRE(!b);
 
-	j = jsonrpcServer->admin_net_peers(sess1);
+	j = adminNetFace->admin_net_peers(sess1);
 	BOOST_REQUIRE(j.empty());
 
-	j = jsonrpcServer->admin_net_nodeInfo(sess2);
+	j = adminNetFace->admin_net_nodeInfo(sess2);
 	BOOST_REQUIRE_EQUAL(j["id"].asString(), web3->id().hex());
 	BOOST_REQUIRE_EQUAL(j["port"].asUInt(), web3->nodeInfo().port);
 
@@ -381,23 +404,23 @@ BOOST_AUTO_TEST_CASE(server)
 	BOOST_REQUIRE(port2);
 	BOOST_REQUIRE_NE(port2, web3->nodeInfo().port);
 
-	b = jsonrpcServer->admin_net_start(sess2);
+	b = adminNetFace->admin_net_start(sess2);
 	BOOST_REQUIRE(b);
 	
 	for (unsigned i = 0; i < 2000 && !host2.haveNetwork(); i += step)
 		this_thread::sleep_for(chrono::milliseconds(step));
 
-	for (unsigned i = 0; i < 2000 && !jsonrpcServer->net_listening(); i += step)
+	for (unsigned i = 0; i < 2000 && !netFace->net_listening(); i += step)
 		this_thread::sleep_for(chrono::milliseconds(step));
 
 	BOOST_REQUIRE(host2.haveNetwork());
-	BOOST_REQUIRE(jsonrpcServer->net_listening());
+	BOOST_REQUIRE(netFace->net_listening());
 
 	string node("enode://");
 	node += host2.id().hex();
 	node += "@127.0.0.1:";
 	node += toString(port2);
-	b = jsonrpcServer->admin_net_connect(node, sess2);
+	b = adminNetFace->admin_net_connect(node, sess2);
 
 	for (unsigned i = 0; i < 3000 && !host2.peerCount(); i += step)
 		this_thread::sleep_for(chrono::milliseconds(step));
@@ -405,36 +428,36 @@ BOOST_AUTO_TEST_CASE(server)
 	BOOST_REQUIRE_EQUAL(host2.peerCount(), 1);
 	this_thread::sleep_for(chrono::milliseconds(step));
 
-	j = jsonrpcServer->admin_net_peers(sess2);
+	j = adminNetFace->admin_net_peers(sess2);
 	BOOST_REQUIRE_EQUAL(j.size(), 1);
 	Json::Value peer = j[0];
 	s = peer["id"].asString();
 	BOOST_REQUIRE_EQUAL(s, host2.id().hex());
 	BOOST_REQUIRE_EQUAL(peer["port"].asUInt(), port2);
 
-	s = jsonrpcServer->net_peerCount();
+	s = netFace->net_peerCount();
 	BOOST_REQUIRE_EQUAL(s, "0x1");
 
 	KeyPair src = KeyPair::create();
 	KeyPair dst = KeyPair::create();
 
 	Json::Value t1 = createMessage(toJS(src.address()), toJS(dst.address()));
-	b = jsonrpcServer->shh_post(t1);
+	b = whisperFace->shh_post(t1);
 	BOOST_REQUIRE(b);
 
-	string const id = jsonrpcServer->shh_newIdentity();
+	string const id = whisperFace->shh_newIdentity();
 	BOOST_REQUIRE_EQUAL(id.size(), 130);
-	BOOST_REQUIRE(jsonrpcServer->shh_hasIdentity(id));
+	BOOST_REQUIRE(whisperFace->shh_hasIdentity(id));
 
 	Json::Value t2 = createMessage(id, id);
-	b = jsonrpcServer->shh_post(t2);
+	b = whisperFace->shh_post(t2);
 	BOOST_REQUIRE(b);
 
 	string const nonexistent = "123456789";
-	b = jsonrpcServer->shh_uninstallFilter(nonexistent);
+	b = whisperFace->shh_uninstallFilter(nonexistent);
 	BOOST_REQUIRE(b);
 
-	j = jsonrpcServer->shh_getMessages(nonexistent);
+	j = whisperFace->shh_getMessages(nonexistent);
 	BOOST_REQUIRE(j.empty());
 
 	string const topic = "unicorns";
@@ -443,20 +466,20 @@ BOOST_AUTO_TEST_CASE(server)
 	Json::Value f;
 	f["to"] = id;
 	f["topics"] = t;
-	string const filter = jsonrpcServer->shh_newFilter(f);
+	string const filter = whisperFace->shh_newFilter(f);
 
-	j = jsonrpcServer->shh_getFilterChanges(filter);
+	j = whisperFace->shh_getFilterChanges(filter);
 	BOOST_REQUIRE(j.empty());
 
-	j = jsonrpcServer->shh_getMessages(filter);
+	j = whisperFace->shh_getMessages(filter);
 	BOOST_REQUIRE(j.empty());
 
 	Json::Value msg = createMessage(id, id, topic, text);
-	b = jsonrpcServer->shh_post(msg);
+	b = whisperFace->shh_post(msg);
 	BOOST_REQUIRE(b);
 	this_thread::sleep_for(chrono::milliseconds(50));
 
-	j = jsonrpcServer->shh_getFilterChanges(filter);
+	j = whisperFace->shh_getFilterChanges(filter);
 	BOOST_REQUIRE(!j.empty());
 	Json::Value m1 = j[0];
 	BOOST_REQUIRE_EQUAL(m1["ttl"], toJS(c_ttl));
@@ -464,7 +487,7 @@ BOOST_AUTO_TEST_CASE(server)
 	BOOST_REQUIRE_EQUAL(m1["to"], id);
 	BOOST_REQUIRE_EQUAL(m1["payload"], text);
 
-	j = jsonrpcServer->shh_getMessages(filter);	
+	j = whisperFace->shh_getMessages(filter);	
 	BOOST_REQUIRE(!j.empty());
 	Json::Value m2 = j[0];
 	BOOST_REQUIRE_EQUAL(m2["ttl"], toJS(c_ttl));
@@ -472,10 +495,10 @@ BOOST_AUTO_TEST_CASE(server)
 	BOOST_REQUIRE_EQUAL(m2["to"], id);
 	BOOST_REQUIRE_EQUAL(m2["payload"], text);
 
-	j = jsonrpcServer->shh_getFilterChanges(filter);
+	j = whisperFace->shh_getFilterChanges(filter);
 	BOOST_REQUIRE(j.empty());
 
-	j = jsonrpcServer->shh_getMessages(filter);
+	j = whisperFace->shh_getMessages(filter);
 	BOOST_REQUIRE(!j.empty());
 	m1 = j[0];
 	BOOST_REQUIRE_EQUAL(m1["ttl"], toJS(c_ttl));
@@ -484,40 +507,40 @@ BOOST_AUTO_TEST_CASE(server)
 	BOOST_REQUIRE_EQUAL(m1["payload"], text);
 
 	msg = createMessage(id, id, topic);
-	b = jsonrpcServer->shh_post(msg);
+	b = whisperFace->shh_post(msg);
 	BOOST_REQUIRE(b);
 	this_thread::sleep_for(chrono::milliseconds(50));
 
-	j = jsonrpcServer->shh_getFilterChanges(filter);
+	j = whisperFace->shh_getFilterChanges(filter);
 	BOOST_REQUIRE_EQUAL(j.size(), 1);
 
-	j = jsonrpcServer->shh_getMessages(filter);
+	j = whisperFace->shh_getMessages(filter);
 	BOOST_REQUIRE_EQUAL(j.size(), 2);
 
-	b = jsonrpcServer->shh_uninstallFilter(filter);
+	b = whisperFace->shh_uninstallFilter(filter);
 	BOOST_REQUIRE(b);
 
-	j = jsonrpcServer->shh_getFilterChanges(filter);
+	j = whisperFace->shh_getFilterChanges(filter);
 	BOOST_REQUIRE(j.empty());
 
-	j = jsonrpcServer->shh_getMessages(filter);
+	j = whisperFace->shh_getMessages(filter);
 	BOOST_REQUIRE(j.empty());
 
 	msg = createMessage(id, id, topic);
-	b = jsonrpcServer->shh_post(msg);
+	b = whisperFace->shh_post(msg);
 	BOOST_REQUIRE(b);
 	this_thread::sleep_for(chrono::milliseconds(50));
 
-	j = jsonrpcServer->shh_getFilterChanges(filter);
+	j = whisperFace->shh_getFilterChanges(filter);
 	BOOST_REQUIRE(j.empty());
 
-	j = jsonrpcServer->shh_getMessages(filter);
+	j = whisperFace->shh_getMessages(filter);
 	BOOST_REQUIRE(j.empty());
 
-	b = jsonrpcServer->admin_net_stop(sess2);
+	b = adminNetFace->admin_net_stop(sess2);
 	BOOST_REQUIRE(b);
 
-	b = jsonrpcServer->net_listening();
+	b = netFace->net_listening();
 	BOOST_REQUIRE(!b);
 }
 

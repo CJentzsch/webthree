@@ -14,11 +14,34 @@
 	You should have received a copy of the GNU General Public License
 	along with cpp-ethereum.  If not, see <http://www.gnu.org/licenses/>.
 */
-/** @file JSLocalConsole.cpp
- * @author Marek Kotewicz <marek@ethdev.com>
+/** @file Net.cpp
+ * @authors:
+ *   Gav Wood <i@gavwood.com>
+ *   Marek Kotewicz <marek@ethdev.com>
  * @date 2015
- * Ethereum client.
  */
 
-#include "JSLocalConsole.h"
+#include <libwebthree/WebThree.h>
+#include <libdevcore/CommonJS.h>
+#include <libethcore/Common.h>
+#include "Net.h"
 
+using namespace dev;
+using namespace dev::rpc;
+
+Net::Net(WebThreeNetworkFace& _network): m_network(_network) {}
+
+std::string Net::net_version()
+{
+	return toJS((unsigned)eth::c_network);
+}
+
+std::string Net::net_peerCount()
+{
+	return toJS(m_network.peerCount());
+}
+
+bool Net::net_listening()
+{
+	return m_network.isNetworkStarted();
+}
